@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bass Tab</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <p class="eyebrow">Bajo · 4 cuerdas</p>
+        <h1>Bass Tab</h1>
+        <p id="lede" class="lede">
+          Sube el MP3 completo. Se separa una vez y queda en la lista para tocarla cuando quieras.
+        </p>
+      </div>
+      <div class="actions">
+        <button id="back" class="ghost" type="button" hidden>Canciones</button>
+        <button id="openFile" type="button">Añadir canción</button>
+      </div>
+    </header>
+
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section id="library">
+      <h2 class="catalog-title">Canciones</h2>
+      <div id="catalog" class="catalog"></div>
+      <div id="drop" class="drop">
+        <p class="drop-title">Suelta el MP3 de la canción</p>
+        <p class="hint">MP3, WAV, FLAC, M4A, OGG u OPUS. Voces, batería, bajo y el resto se guardan con la canción.</p>
+        <label class="file">
+          Elegir archivo
+          <input id="songFile" type="file" accept=".mp3,.wav,.flac,.m4a,.ogg,.opus,audio/*" />
+        </label>
+      </div>
+    </section>
+
+    <section id="progress" class="progress" hidden>
+      <div class="progress-row">
+        <p id="progressLabel">Leyendo el bajo…</p>
+        <p id="progressPct">0%</p>
+      </div>
+      <div class="progress-track"><div id="progressBar"></div></div>
+    </section>
+
+    <section id="player" hidden>
+      <div class="transport">
+        <button id="play" type="button">Reproducir</button>
+        <span id="time">0:00</span>
+        <div id="scrub" class="scrub" role="slider" aria-label="Posición" aria-valuemin="0" aria-valuemax="100" tabindex="0">
+          <div id="scrubFill"></div>
+        </div>
+        <span id="duration">0:00</span>
+        <div class="speeds" role="group" aria-label="Velocidad">
+          <button type="button" data-speed="0.5">50%</button>
+          <button type="button" data-speed="0.75">75%</button>
+          <button type="button" data-speed="1" class="is-on">100%</button>
+        </div>
+        <button id="loop" type="button" aria-pressed="false">Repetir</button>
+      </div>
+      <p id="nowPlaying" class="now">Carga el audio para ver la nota.</p>
+      <div class="stage">
+        <div class="names" id="names"></div>
+        <div class="lane">
+          <div class="playhead" aria-hidden="true"></div>
+          <div class="scroller" id="scroller">
+            <div class="sheet" id="sheet"></div>
+          </div>
+        </div>
+      </div>
+      <div id="mixer" class="mixer"></div>
+      <div class="export-row">
+        <button id="export" type="button">Exportar MP3</button>
+        <p id="exportStatus" class="hint"></p>
+      </div>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
