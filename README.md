@@ -29,7 +29,7 @@ Copia la carpeta entera, o clona el repositorio, y abre `Bass Tab.exe`. No copie
 
 ## Uso
 
-1. En el menú, suelta el MP3 completo o pulsa Añadir canción.
+1. En el menú, suelta un MP3, pulsa Añadir canción, o suelta una carpeta con Añadir carpeta. La carpeta entra entera y las canciones se separan de una en una.
 2. La primera vez separa las pistas y escribe la tablatura. La canción queda en la lista.
 3. La siguiente vez, el mismo archivo se abre al momento. Tocar entra en la tablatura.
 4. Quitar la saca de la lista. Si la vuelves a añadir, se separa de nuevo.

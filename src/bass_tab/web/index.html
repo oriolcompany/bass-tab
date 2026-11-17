@@ -12,11 +12,12 @@
         <p class="eyebrow">Bajo · 4 cuerdas</p>
         <h1>Bass Tab</h1>
         <p id="lede" class="lede">
-          Sube el MP3 completo. Se separa una vez y queda en la lista para tocarla cuando quieras.
+          Sube un MP3 o una carpeta. Cada canción se separa una vez y queda en la lista.
         </p>
       </div>
       <div class="actions">
         <button id="back" class="ghost" type="button" hidden>Canciones</button>
+        <button id="openFolder" class="ghost" type="button">Añadir carpeta</button>
         <button id="openFile" type="button">Añadir canción</button>
       </div>
     </header>
@@ -25,14 +26,35 @@
 
     <section id="library">
       <h2 class="catalog-title">Canciones</h2>
+      <div id="catalogTools" class="catalog-tools" hidden>
+        <input id="search" type="search" placeholder="Buscar canción" autocomplete="off" aria-label="Buscar canción" />
+        <label class="sort">
+          Orden
+          <select id="sort" aria-label="Ordenar canciones">
+            <option value="recent">Más recientes</option>
+            <option value="oldest">Más antiguas</option>
+            <option value="title">Título A-Z</option>
+            <option value="title-desc">Título Z-A</option>
+            <option value="short">Más cortas</option>
+            <option value="long">Más largas</option>
+          </select>
+        </label>
+      </div>
+      <p id="batchStatus" class="batch" hidden></p>
       <div id="catalog" class="catalog"></div>
       <div id="drop" class="drop">
-        <p class="drop-title">Suelta el MP3 de la canción</p>
-        <p class="hint">MP3, WAV, FLAC, M4A, OGG u OPUS. Voces, batería, bajo y el resto se guardan con la canción.</p>
-        <label class="file">
-          Elegir archivo
-          <input id="songFile" type="file" accept=".mp3,.wav,.flac,.m4a,.ogg,.opus,audio/*" />
-        </label>
+        <p class="drop-title">Suelta una canción o una carpeta</p>
+        <p class="hint">MP3, WAV, FLAC, M4A, OGG u OPUS. Una carpeta se añade entera y se separa de una en una.</p>
+        <div class="pickers">
+          <label class="file">
+            Elegir archivo
+            <input id="songFile" type="file" accept=".mp3,.wav,.flac,.m4a,.ogg,.opus,audio/*" />
+          </label>
+          <label class="file">
+            Elegir carpeta
+            <input id="folderFile" type="file" webkitdirectory directory multiple />
+          </label>
+        </div>
       </div>
     </section>
 
@@ -56,6 +78,11 @@
           <button type="button" data-speed="0.5">50%</button>
           <button type="button" data-speed="0.75">75%</button>
           <button type="button" data-speed="1" class="is-on">100%</button>
+        </div>
+        <div class="tone" role="group" aria-label="Tono">
+          <button id="toneDown" type="button" aria-label="Bajar un semitono">−</button>
+          <span id="toneLabel">Tono</span>
+          <button id="toneUp" type="button" aria-label="Subir un semitono">+</button>
         </div>
         <button id="loop" type="button" aria-pressed="false">Repetir</button>
       </div>

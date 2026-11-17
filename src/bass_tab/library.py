@@ -99,7 +99,11 @@ def list_songs() -> list[dict]:
             continue
         songs.append({key: song.get(key) for key in _SUMMARY})
     songs.sort(key=lambda song: song.get("created") or "", reverse=True)
-    return songs
+    queued = [song for song in songs if song.get("status") == "queued"]
+    queued.sort(key=lambda song: song.get("created") or "")
+    running = [song for song in songs if song.get("status") == "running"]
+    rest = [song for song in songs if song.get("status") not in ("running", "queued")]
+    return running + queued + rest
 
 
 def delete_song(song_id: str) -> None:
@@ -121,7 +125,7 @@ def recover_interrupted() -> None:
         pending = [
             song["id"]
             for song in _songs_unlocked()
-            if song.get("status") == "running" and song.get("id")
+            if song.get("status") in ("running", "queued") and song.get("id")
         ]
     for song_id in pending:
         write_song(

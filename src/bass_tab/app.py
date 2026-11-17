@@ -23,6 +23,7 @@ from . import library
 from .audio import SPEEDS, AudioError, ffmpeg_available, stretch_wav
 from .mix import export_mix
 from .separate import TRACK_ORDER, separate_file, separation_available, track_payload
+from .tab import transpose_notes
 from .transcribe import transcribe_bass
 
 log = logging.getLogger("bass_tab")
@@ -33,27 +34,51 @@ _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
 class ExportBody(BaseModel):
     gains: dict[str, float] = {}
+    semitones: int = 0
+
+
+class ArrangeBody(BaseModel):
+    semitones: int = 0
 
 
 app = FastAPI(title="Bass Tab", docs_url=None, redoc_url=None)
 _active_lock = threading.Lock()
 _active: str | None = None
+_pending: list[tuple[str, Path]] = []
 
 
-def _begin(song_id: str) -> bool:
+def _occupied(song_id: str) -> bool:
+    with _active_lock:
+        return _active == song_id or any(item[0] == song_id for item in _pending)
+
+
+def _reserve(song_id: str, source: Path) -> str:
+    """Claim the separator. One song runs; the rest wait in order."""
     global _active
     with _active_lock:
-        if _active is not None:
-            return False
-        _active = song_id
-        return True
+        if _active == song_id or any(item[0] == song_id for item in _pending):
+            return "duplicate"
+        if _active is None:
+            _active = song_id
+            return "started"
+        _pending.append((song_id, source))
+        return "queued"
 
 
-def _end(song_id: str) -> None:
+def _release(song_id: str) -> None:
     global _active
+    nxt: tuple[str, Path] | None = None
     with _active_lock:
+        _pending[:] = [item for item in _pending if item[0] != song_id]
         if _active == song_id:
             _active = None
+        if _active is None and _pending:
+            nxt = _pending.pop(0)
+            _active = nxt[0]
+    if nxt is None:
+        return
+    library.write_song(nxt[0], status="running", phase="leyendo", progress=0.02, error=None)
+    _start_background(_run_song, nxt)
 
 
 def _load(song_id: str) -> dict:
@@ -146,7 +171,7 @@ def _run_song(song_id: str, source: Path) -> None:
         log.exception("Canción %s ha fallado", song_id)
         library.write_song(song_id, status="error", phase="error", error=f"No se ha podido preparar: {exc}")
     finally:
-        _end(song_id)
+        _release(song_id)
 
 
 @app.get("/api/health")
@@ -170,7 +195,7 @@ async def create_song(song: UploadFile = File(...)):
     library.recover_interrupted()
 
     incoming = library.songs_root() / "incoming" / f"{uuid.uuid4().hex}{suffix}"
-    started = False
+    claimed = False
     song_id = ""
     try:
         if await _save(song, incoming) <= 0:
@@ -179,11 +204,8 @@ async def create_song(song: UploadFile = File(...)):
         if _finished(song_id):
             library.write_song(song_id, title=_title(song.filename))
             return JSONResponse({"id": song_id, "cached": True}, status_code=200)
-        if not _begin(song_id):
-            if _active == song_id:
-                return {"id": song_id, "cached": False}
-            raise HTTPException(status_code=409, detail="Ya se está preparando otra canción")
-        started = True
+        if _occupied(song_id):
+            return {"id": song_id, "cached": False, "queued": True}
         folder = library.song_dir(song_id)
         folder.mkdir(parents=True, exist_ok=True)
         for old in folder.glob("source.*"):
@@ -195,13 +217,17 @@ async def create_song(song: UploadFile = File(...)):
             existing = library.read_song(song_id)
         except (FileNotFoundError, json.JSONDecodeError):
             existing = {}
+        state = _reserve(song_id, source)
+        if state == "duplicate":
+            return {"id": song_id, "cached": False, "queued": True}
+        claimed = state == "started"
         library.write_song(
             song_id,
             title=_title(song.filename),
             created=existing.get("created") or library.now(),
-            status="running",
-            phase="leyendo",
-            progress=0.02,
+            status="running" if claimed else "queued",
+            phase="leyendo" if claimed else "cola",
+            progress=0.02 if claimed else 0,
             tracks=[],
             notes=[],
             tuning=[],
@@ -210,19 +236,20 @@ async def create_song(song: UploadFile = File(...)):
             error=None,
         )
     except HTTPException:
-        if started:
-            _end(song_id)
+        if claimed:
+            _release(song_id)
         raise
     except Exception as exc:
-        if started:
-            _end(song_id)
+        if claimed:
+            _release(song_id)
         log.exception("No se ha podido guardar la canción")
         raise HTTPException(status_code=500, detail="No se ha podido guardar la canción") from exc
     finally:
         incoming.unlink(missing_ok=True)
 
-    _start_background(_run_song, (song_id, source))
-    return {"id": song_id, "cached": False}
+    if claimed:
+        _start_background(_run_song, (song_id, source))
+    return {"id": song_id, "cached": False, "queued": not claimed}
 
 
 @app.get("/api/songs/{song_id}")
@@ -232,8 +259,10 @@ def song_status(song_id: str) -> dict:
 
 @app.delete("/api/songs/{song_id}", status_code=204)
 def remove_song(song_id: str) -> None:
-    if _active == song_id:
-        raise HTTPException(status_code=409, detail="Esa canción se está preparando")
+    with _active_lock:
+        if _active == song_id:
+            raise HTTPException(status_code=409, detail="Esa canción se está preparando")
+        _pending[:] = [item for item in _pending if item[0] != song_id]
     try:
         library.delete_song(song_id)
     except KeyError:
@@ -257,10 +286,29 @@ def export_song(song_id: str, body: ExportBody) -> FileResponse:
         pairs.append((folder / f"{track_id}.wav", body.gains.get(track_id, 1.0)))
     target = folder / "mix.mp3"
     try:
-        export_mix(pairs, target)
+        export_mix(pairs, target, semitones=_semitones(body.semitones))
     except AudioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return FileResponse(target, media_type="audio/mpeg", filename=f"{_title(status.get('title'))}.mp3")
+
+
+@app.post("/api/songs/{song_id}/arrange")
+def arrange_song(song_id: str, body: ArrangeBody) -> dict:
+    status = _load(song_id)
+    if status.get("status") != "done":
+        raise HTTPException(status_code=409, detail="La canción todavía no está lista")
+    semitones = _semitones(body.semitones)
+    try:
+        notes = transpose_notes(status.get("notes") or [], semitones)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"semitones": semitones, "notes": notes}
+
+
+def _semitones(value: int) -> int:
+    if value < -12 or value > 12:
+        raise HTTPException(status_code=400, detail="El tono va de −12 a +12 semitonos")
+    return value
 
 
 @app.get("/api/songs/{song_id}/audio/{track_id}")

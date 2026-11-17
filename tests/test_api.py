@@ -1,3 +1,5 @@
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -6,6 +8,7 @@ from fastapi.testclient import TestClient
 from bass_tab import app as app_module
 from bass_tab import library
 from bass_tab.audio import to_pcm_wav
+from bass_tab.mix import mix_command
 from wavutil import write_bass
 
 
@@ -20,11 +23,13 @@ def isolated_songs(tmp_path, monkeypatch):
     library._recovered = False
     with app_module._active_lock:
         app_module._active = None
+        app_module._pending.clear()
     yield
     library._cache.clear()
     library._recovered = False
     with app_module._active_lock:
         app_module._active = None
+        app_module._pending.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +118,99 @@ def test_song_is_separated_once_and_listed(client, fake_separator, tmp_path):
     again = client.post("/api/songs", files={"song": ("caminata.wav", payload, "audio/wav")})
     assert again.status_code == 202
     assert fake_separator.calls == 2
+
+
+def test_arrange_transposes_without_replacing_the_saved_line(client, tmp_path):
+    audio = tmp_path / "la.wav"
+    write_bass(audio, [(55.0, 0.45, 0.6)])
+    created = client.post("/api/songs", files={"song": ("la.wav", audio.read_bytes(), "audio/wav")})
+    song_id = created.json()["id"]
+    original = client.get(f"/api/songs/{song_id}").json()["notes"]
+    assert original[0]["midi"] == 33
+    moved = client.post(f"/api/songs/{song_id}/arrange", json={"semitones": 2})
+    assert moved.status_code == 200
+    assert moved.json()["notes"][0]["midi"] == 35
+    assert moved.json()["notes"][0]["shifted"] == 0
+    assert client.get(f"/api/songs/{song_id}").json()["notes"][0]["midi"] == 33
+    refused = client.post(f"/api/songs/{song_id}/arrange", json={"semitones": 13})
+    assert refused.status_code == 400
+
+
+def test_a_folder_is_prepared_one_song_at_a_time(client, monkeypatch, tmp_path):
+    gate = threading.Event()
+    entered = threading.Event()
+    order = []
+
+    def blocking(audio_path, dest_dir, on_progress=None):
+        order.append(Path(audio_path).parent.name)
+        entered.set()
+        assert gate.wait(5)
+        folder = Path(dest_dir)
+        to_pcm_wav(audio_path, folder / "bass.wav")
+        to_pcm_wav(audio_path, folder / "drums.wav")
+        return ["bass", "drums"]
+
+    threads = []
+
+    def start(target, args):
+        thread = threading.Thread(target=target, args=args, daemon=True)
+        threads.append(thread)
+        thread.start()
+
+    monkeypatch.setattr(app_module, "separate_file", blocking)
+    monkeypatch.setattr(app_module, "_start_background", start)
+
+    first = tmp_path / "una.wav"
+    second = tmp_path / "dos.wav"
+    write_bass(first, [(55.0, 0.3, 0.5)])
+    write_bass(second, [(82.4, 0.3, 0.5)])
+    try:
+        created = client.post("/api/songs", files={"song": ("una.wav", first.read_bytes(), "audio/wav")})
+        assert created.status_code == 202
+        assert created.json()["queued"] is False
+        assert entered.wait(5)
+        queued = client.post("/api/songs", files={"song": ("dos.wav", second.read_bytes(), "audio/wav")})
+        assert queued.status_code == 202
+        assert queued.json()["queued"] is True
+        menu = {song["title"]: song["status"] for song in client.get("/api/songs").json()["songs"]}
+        assert menu["una"] == "running"
+        assert menu["dos"] == "queued"
+        removed = client.delete(f"/api/songs/{queued.json()['id']}")
+        assert removed.status_code == 204
+        third = tmp_path / "tres.wav"
+        write_bass(third, [(110.0, 0.3, 0.5)])
+        again = client.post("/api/songs", files={"song": ("tres.wav", third.read_bytes(), "audio/wav")})
+        assert again.json()["queued"] is True
+        gate.set()
+
+        def wait_done(song_id):
+            for _ in range(100):
+                body = client.get(f"/api/songs/{song_id}").json()
+                if body["status"] in {"done", "error"}:
+                    return body
+                time.sleep(0.05)
+            raise AssertionError(song_id)
+
+        assert wait_done(created.json()["id"])["status"] == "done"
+        assert wait_done(again.json()["id"])["status"] == "done"
+        titles = {song["title"] for song in client.get("/api/songs").json()["songs"]}
+        assert titles == {"tres", "una"}
+        assert order == [created.json()["id"], again.json()["id"]]
+    finally:
+        gate.set()
+        for thread in threads:
+            thread.join(5)
+
+
+def test_export_command_can_shift_the_pitch(tmp_path):
+    audio = tmp_path / "bajo.wav"
+    write_bass(audio, [(55.0, 0.2, 0.4)])
+    plain = " ".join(mix_command([(audio, 1)], tmp_path / "igual.mp3"))
+    assert "asetrate=" not in plain
+    shifted = " ".join(mix_command([(audio, 0.25)], tmp_path / "arriba.mp3", semitones=2))
+    assert "asetrate=" in shifted
+    assert "atempo=" in shifted
+    assert "volume=0.250000" in shifted
 
 
 @pytest.mark.skipif(not app_module.ffmpeg_available(), reason="ffmpeg no está instalado")

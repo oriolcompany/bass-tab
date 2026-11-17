@@ -28,6 +28,93 @@ def candidates(midi: int) -> list[tuple[int, int]]:
     return found
 
 
+def transpose_notes(notes: list[dict], semitones: int) -> list[dict]:
+    """Shift the bass line, then finger it again. A phrase that leaves the neck moves by octaves."""
+    if not notes:
+        return []
+    requested = [int(note["midi"]) + semitones for note in notes]
+    sounding = arrange_midis(requested, _phrase_breaks(notes))
+    positions = assign_positions(sounding)
+    rendered: list[dict] = []
+    for note, midi, asked, (string, fret) in zip(notes, sounding, requested, positions):
+        name, open_midi = STRINGS[string]
+        rendered.append(
+            {
+                "start": note["start"],
+                "duration": note["duration"],
+                "midi": midi,
+                "name": note_name(midi),
+                "string": string,
+                "stringName": name,
+                "fret": fret,
+                "openMidi": open_midi,
+                "shifted": (midi - asked) // 12,
+            }
+        )
+    return rendered
+
+
+def arrange_midis(midis: list[int], breaks: list[bool] | None = None) -> list[int]:
+    """Move a whole phrase by octaves when several notes leave the neck; otherwise fix the outliers."""
+    if not midis:
+        return []
+    breaks = breaks or [False] * len(midis)
+    sounding: list[int] = []
+    phrase: list[int] = []
+    for midi, new_phrase in zip(midis, breaks):
+        if new_phrase and phrase:
+            sounding.extend(_arrange_phrase(phrase))
+            phrase = []
+        phrase.append(midi)
+    if phrase:
+        sounding.extend(_arrange_phrase(phrase))
+    return sounding
+
+
+def _phrase_breaks(notes: list[dict]) -> list[bool]:
+    breaks = [False]
+    for previous, note in zip(notes, notes[1:]):
+        gap = float(note["start"]) - (float(previous["start"]) + float(previous["duration"]))
+        breaks.append(gap > 0.5)
+    return breaks
+
+
+def _arrange_phrase(midis: list[int]) -> list[int]:
+    best_shift = 0
+    best_cost: float | None = None
+    for shift in (0, 1, -1, 2, -2):
+        moved = [midi + 12 * shift for midi in midis]
+        misses = sum(1 for midi in moved if not candidates(midi))
+        cost = abs(shift) * len(midis) + misses * 3
+        if best_cost is None or cost < best_cost or (cost == best_cost and abs(shift) < abs(best_shift)):
+            best_cost = cost
+            best_shift = shift
+    chosen: list[int] = []
+    for midi in midis:
+        pitched = midi + 12 * best_shift
+        if candidates(pitched):
+            chosen.append(pitched)
+        else:
+            chosen.append(_nearest_playable(pitched))
+    return chosen
+
+
+def _nearest_playable(midi: int) -> int:
+    options = _playable_pitches(midi)
+    if not options:
+        raise ValueError(f"Nota fuera del mástil: {midi}")
+    return min(options, key=lambda item: (abs(item - midi), -item))
+
+
+def _playable_pitches(midi: int) -> list[int]:
+    found: list[int] = []
+    for octave in range(-5, 6):
+        candidate = midi + 12 * octave
+        if candidates(candidate):
+            found.append(candidate)
+    return found
+
+
 def assign_positions(midis: list[int]) -> list[tuple[int, int]]:
     """Pick a fret and string per note, staying in a comfortable position."""
     options = [candidates(midi) for midi in midis]

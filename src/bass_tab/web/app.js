@@ -5,17 +5,25 @@ const PHASES = {
   codificando: "Guardando las pistas",
   notas: "Encontrando las notas del bajo",
   tablatura: "Colocando la tablatura",
+  cola: "En cola",
   listo: "Listo",
 };
-const MENU_TEXT = "Sube el MP3 completo. Se separa una vez y queda en la lista para tocarla cuando quieras.";
+const MENU_TEXT = "Sube un MP3 o una carpeta. Cada canción se separa una vez y queda en la lista.";
+const AUDIO = /\.(mp3|wav|flac|m4a|ogg|opus)$/i;
 
 const openButton = document.getElementById("openFile");
+const folderButton = document.getElementById("openFolder");
 const backButton = document.getElementById("back");
 const library = document.getElementById("library");
 const catalog = document.getElementById("catalog");
+const catalogTools = document.getElementById("catalogTools");
+const searchInput = document.getElementById("search");
+const sortInput = document.getElementById("sort");
 const lede = document.getElementById("lede");
 const drop = document.getElementById("drop");
+const batchStatus = document.getElementById("batchStatus");
 const songInput = document.getElementById("songFile");
+const folderInput = document.getElementById("folderFile");
 const progress = document.getElementById("progress");
 const progressLabel = document.getElementById("progressLabel");
 const progressPct = document.getElementById("progressPct");
@@ -34,6 +42,9 @@ const mixer = document.getElementById("mixer");
 const exportButton = document.getElementById("export");
 const exportStatus = document.getElementById("exportStatus");
 const loopButton = document.getElementById("loop");
+const toneDown = document.getElementById("toneDown");
+const toneUp = document.getElementById("toneUp");
+const toneLabel = document.getElementById("toneLabel");
 const errorBox = document.getElementById("error");
 
 const PIXELS_PER_SECOND = 150;
@@ -60,9 +71,23 @@ let loopStart = 0;
 let loopEnd = 0;
 let noteButtons = [];
 let requestToken = 0;
+let semitones = 0;
+let arrangeToken = 0;
+let baseNotes = [];
 let separatorReady = true;
+let librarySongs = [];
+const SORTS = new Set(["recent", "oldest", "title", "title-desc", "short", "long"]);
+let sortMode = SORTS.has(localStorage.getItem("bass-tab-sort")) ? localStorage.getItem("bass-tab-sort") : "recent";
+sortInput.value = sortMode;
+searchInput.addEventListener("input", () => applyCatalog());
+sortInput.addEventListener("change", () => {
+  sortMode = SORTS.has(sortInput.value) ? sortInput.value : "recent";
+  localStorage.setItem("bass-tab-sort", sortMode);
+  applyCatalog();
+});
 
 openButton.addEventListener("click", () => songInput.click());
+folderButton.addEventListener("click", () => folderInput.click());
 backButton.addEventListener("click", () => {
   requestToken += 1;
   showLibrary();
@@ -71,6 +96,11 @@ songInput.addEventListener("change", () => {
   const file = songInput.files && songInput.files[0];
   songInput.value = "";
   if (file) upload(file);
+});
+folderInput.addEventListener("change", () => {
+  const files = [...(folderInput.files || [])];
+  folderInput.value = "";
+  if (files.length) uploadFolder(files);
 });
 library.addEventListener("dragover", (event) => {
   event.preventDefault();
@@ -82,14 +112,27 @@ library.addEventListener("dragleave", (event) => {
 library.addEventListener("drop", (event) => {
   event.preventDefault();
   drop.classList.remove("is-over");
-  const files = [...(event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files : [])];
-  if (files.length) upload(files[0]);
+  if (uploading) return;
+  dropped(event.dataTransfer).then((result) => {
+    if (!result.files.length) {
+      showError("No hay canciones de audio en lo que has soltado.");
+      return;
+    }
+    if (result.folder || result.files.length > 1) uploadFolder(result.files);
+    else upload(result.files[0]);
+  }).catch((error) => showError(error.message || "No se ha podido leer la carpeta"));
 });
 playButton.addEventListener("click", () => {
   toggle().catch((error) => showError(error.message || "No se ha podido reproducir"));
 });
 exportButton.addEventListener("click", () => {
   exportMix().catch((error) => setExport(error.message || "No se ha podido exportar", "bad"));
+});
+toneDown.addEventListener("click", () => {
+  setTranspose(semitones - 1).catch((error) => showError(error.message));
+});
+toneUp.addEventListener("click", () => {
+  setTranspose(semitones + 1).catch((error) => showError(error.message));
 });
 loopButton.addEventListener("click", () => {
   loopOn = !loopOn;
@@ -129,10 +172,11 @@ else showLibrary();
 async function upload(file) {
   const token = ++requestToken;
   clearError();
+  hideBatch();
   stopPlayback(true);
   const body = new FormData();
   body.append("song", file, file.name);
-  openButton.disabled = true;
+  setUploading(true);
   showProgress({ phase: "leyendo", progress: 0.02, title: file.name });
   try {
     const created = await api("/api/songs", { method: "POST", body });
@@ -143,8 +187,148 @@ async function upload(file) {
     await showLibrary();
     showError(error.message || "No se ha podido preparar la canción");
   } finally {
-    openButton.disabled = false;
+    setUploading(false);
   }
+}
+
+async function uploadFolder(files) {
+  const audio = audioFiles(files);
+  if (!audio.length) {
+    showError("Esa carpeta no tiene MP3, WAV, FLAC, M4A, OGG ni OPUS.");
+    return;
+  }
+  const token = ++requestToken;
+  ++pollToken;
+  clearError();
+  stopPlayback(true);
+  revealLibrary();
+  setUploading(true);
+  let failed = 0;
+  let cached = 0;
+  let lastError = "";
+  try {
+    for (let index = 0; index < audio.length; index += 1) {
+      if (token !== requestToken) return;
+      const file = audio[index];
+      showBatch(`Subiendo ${index + 1} de ${audio.length} · ${file.name}`);
+      const body = new FormData();
+      body.append("song", file, file.name);
+      try {
+        const created = await api("/api/songs", { method: "POST", body });
+        if (created.cached) cached += 1;
+      } catch (error) {
+        failed += 1;
+        lastError = error.message || "No se ha podido subir";
+      }
+      await refreshLibrary(pollToken);
+    }
+  } finally {
+    setUploading(false);
+  }
+  if (token !== requestToken) return;
+  if (failed === audio.length && lastError) {
+    showBatch("");
+    showError(lastError);
+    return;
+  }
+  if (cached === audio.length) {
+    showBatch(audio.length === 1 ? "Esa canción ya estaba en la lista." : "Esas canciones ya estaban en la lista.");
+    return;
+  }
+  const added = audio.length - failed;
+  const noun = added === 1 ? "canción" : "canciones";
+  const extra = failed ? ` ${failed} no se han podido subir.` : " Se separan de una en una.";
+  showBatch(`Añadidas ${added} ${noun}.${extra}`);
+}
+
+function audioFiles(files) {
+  return [...files]
+    .filter((file) => AUDIO.test(file.name))
+    .sort((a, b) => compareTitle(a.webkitRelativePath || a.name, b.webkitRelativePath || b.name));
+}
+
+async function dropped(dataTransfer) {
+  const items = [...(dataTransfer && dataTransfer.items ? dataTransfer.items : [])];
+  const entries = items.map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null)).filter(Boolean);
+  if (entries.length) {
+    const files = [];
+    for (const entry of entries) await collectEntry(entry, files);
+    return { files: audioFiles(files), folder: entries.some((entry) => entry.isDirectory) };
+  }
+  const files = [...(dataTransfer && dataTransfer.files ? dataTransfer.files : [])];
+  return { files: audioFiles(files), folder: false };
+}
+
+function collectEntry(entry, files) {
+  return new Promise((resolve) => {
+    if (!entry) {
+      resolve();
+      return;
+    }
+    if (entry.isFile) {
+      entry.file(
+        (file) => {
+          files.push(file);
+          resolve();
+        },
+        () => resolve(),
+      );
+      return;
+    }
+    if (!entry.isDirectory) {
+      resolve();
+      return;
+    }
+    const reader = entry.createReader();
+    const children = [];
+    const read = () => {
+      reader.readEntries((batch) => {
+        if (!batch.length) {
+          Promise.all(children.map((child) => collectEntry(child, files))).then(() => resolve());
+          return;
+        }
+        children.push(...batch);
+        read();
+      }, () => resolve());
+    };
+    read();
+  });
+}
+
+function revealLibrary() {
+  job = null;
+  speed = 1;
+  markSpeed(1);
+  library.hidden = false;
+  progress.hidden = true;
+  player.hidden = true;
+  backButton.hidden = true;
+  lede.textContent = MENU_TEXT;
+  document.title = "Bass Tab";
+  const url = new URL(location.href);
+  if (url.search) {
+    url.search = "";
+    history.replaceState(null, "", url);
+  }
+}
+
+function showBatch(text) {
+  batchStatus.hidden = !text;
+  batchStatus.textContent = text || "";
+}
+
+function hideBatch() {
+  showBatch("");
+}
+
+let uploading = false;
+
+function setUploading(busy) {
+  uploading = busy;
+  openButton.disabled = busy;
+  folderButton.disabled = busy;
+  songInput.disabled = busy;
+  folderInput.disabled = busy;
 }
 
 async function watch(id) {
@@ -195,6 +379,7 @@ async function showLibrary() {
   player.hidden = true;
   backButton.hidden = true;
   lede.textContent = MENU_TEXT;
+  hideBatch();
   document.title = "Bass Tab";
   const url = new URL(location.href);
   if (url.search) {
@@ -217,21 +402,36 @@ async function refreshLibrary(token) {
   separatorReady = payload.separation !== false;
   if (!separatorReady) showError("Falta el separador de pistas en este Python.");
   renderCatalog(payload.songs || []);
-  if ((payload.songs || []).some((song) => song.status === "running")) {
+  if ((payload.songs || []).some((song) => song.status === "running" || song.status === "queued")) {
     setTimeout(() => refreshLibrary(token), 800);
   }
 }
 
 function renderCatalog(songs) {
+  librarySongs = songs;
+  applyCatalog();
+}
+
+function applyCatalog() {
+  catalogTools.hidden = librarySongs.length === 0;
+  const query = fold(searchInput.value.trim());
+  const matched = librarySongs.filter((song) => !query || fold(song.title).includes(query));
   catalog.replaceChildren();
-  if (!songs.length) {
+  if (!librarySongs.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "Todavía no hay canciones. Suelta un MP3 para añadir la primera.";
+    empty.textContent = "Todavía no hay canciones. Suelta un MP3 o una carpeta para añadirlas.";
     catalog.append(empty);
     return;
   }
-  for (const song of songs) {
+  if (!matched.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = `Ninguna canción coincide con «${searchInput.value.trim()}».`;
+    catalog.append(empty);
+    return;
+  }
+  for (const song of sortSongs(matched)) {
     const row = document.createElement("div");
     row.className = song.status === "error" ? "song-row is-error" : "song-row";
     const open = document.createElement("button");
@@ -248,7 +448,7 @@ function renderCatalog(songs) {
     copy.append(title, meta);
     const action = document.createElement("span");
     action.className = "song-action";
-    action.textContent = song.status === "done" ? "Tocar" : song.status === "error" ? "Ha fallado" : "Preparando";
+    action.textContent = song.status === "done" ? "Tocar" : song.status === "error" ? "Ha fallado" : song.status === "queued" ? "En cola" : "Preparando";
     open.append(copy, action);
     open.addEventListener("click", () => {
       if (song.status === "error") {
@@ -280,6 +480,39 @@ function renderCatalog(songs) {
   }
 }
 
+function sortSongs(songs) {
+  const copy = [...songs];
+  if (sortMode === "recent") {
+    const rank = (song) => (song.status === "running" ? 0 : song.status === "queued" ? 1 : 2);
+    copy.sort((a, b) => {
+      const diff = rank(a) - rank(b);
+      if (diff) return diff;
+      if (a.status === "queued") return (a.created || "").localeCompare(b.created || "");
+      return (b.created || "").localeCompare(a.created || "");
+    });
+    return copy;
+  }
+  copy.sort((a, b) => {
+    if (sortMode === "oldest") return (a.created || "").localeCompare(b.created || "");
+    if (sortMode === "title") return compareTitle(a.title, b.title);
+    if (sortMode === "title-desc") return compareTitle(b.title, a.title);
+    if (sortMode === "short") return (Number(a.duration) || 0) - (Number(b.duration) || 0);
+    return (Number(b.duration) || 0) - (Number(a.duration) || 0);
+  });
+  return copy;
+}
+
+function compareTitle(a, b) {
+  return fold(a).localeCompare(fold(b), "es", { numeric: true, sensitivity: "base" });
+}
+
+function fold(value) {
+  return (value || "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase();
+}
+
 function songMeta(song) {
   const bits = [];
   if (song.duration) bits.push(formatTime(song.duration));
@@ -288,6 +521,7 @@ function songMeta(song) {
     const pct = Math.round(clamp(Number(song.progress) || 0, 0, 1) * 100);
     bits.push(`${PHASES[song.phase] || "Preparando"} ${pct}%`);
   }
+  if (song.status === "queued") bits.push("En cola");
   if (song.status === "error") bits.push(song.error || "No se ha podido preparar");
   return bits.join(" · ") || "Lista para separar";
 }
@@ -326,6 +560,11 @@ function showPlayer(current) {
   document.title = current.title ? `${current.title} · Bass Tab` : "Bass Tab";
   duration = Number(current.duration) || 0;
   durationLabel.textContent = formatTime(duration);
+  semitones = 0;
+  arrangeToken += 1;
+  baseNotes = (current.notes || []).map((note) => ({ ...note, shifted: 0 }));
+  current.notes = baseNotes.map((note) => ({ ...note }));
+  markTone();
   loopStart = 0;
   loopEnd = duration;
   renderNames(current.tuning || []);
@@ -394,11 +633,12 @@ function renderSheet(current) {
     sustain.style.top = `${STRING_TOP[note.string]}px`;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "note";
+    button.className = note.shifted ? "note is-moved" : "note";
     button.textContent = String(note.fret);
     button.style.left = `${left}px`;
     button.style.top = `${STRING_TOP[note.string]}px`;
-    button.title = `${note.name} · cuerda ${note.stringName} · traste ${note.fret}`;
+    const moved = note.shifted > 0 ? " · octava arriba para que quepa" : note.shifted < 0 ? " · octava abajo para que quepa" : "";
+    button.title = `${note.name} · cuerda ${note.stringName} · traste ${note.fret}${moved}`;
     button.dataset.start = String(note.start);
     button.dataset.end = String(note.start + note.duration);
     button.dataset.label = button.title;
@@ -587,6 +827,7 @@ function startSources() {
     if (!buffer || offset >= buffer.duration - 0.001) continue;
     const source = ctx.createBufferSource();
     source.buffer = buffer;
+    source.detune.value = semitones * 100;
     source.connect(gains[track.id]);
     source.start(anchorCtx, offset);
     active.push(source);
@@ -701,7 +942,7 @@ async function exportMix() {
     const response = await fetch(`/api/songs/${job.id}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ gains }),
+      body: JSON.stringify({ gains, semitones }),
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
@@ -722,6 +963,48 @@ async function exportMix() {
   } finally {
     exportButton.disabled = false;
   }
+}
+
+async function setTranspose(next) {
+  if (!job || job.status !== "done") return;
+  const target = clamp(Math.round(next), -12, 12);
+  semitones = target;
+  markTone();
+  applyDetune();
+  if (target === 0) {
+    arrangeToken += 1;
+    job.notes = baseNotes.map((note) => ({ ...note }));
+    clearError();
+    renderSheet(job);
+    draw();
+    return;
+  }
+  const token = ++arrangeToken;
+  const songId = job.id;
+  const arranged = await api(`/api/songs/${songId}/arrange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ semitones: target }),
+  });
+  if (token !== arrangeToken || !job || job.id !== songId || semitones !== target) return;
+  job.notes = arranged.notes || [];
+  clearError();
+  renderSheet(job);
+  markTone();
+  draw();
+}
+
+function markTone() {
+  const moved = (job && job.notes || []).some((note) => note.shifted);
+  if (!semitones) toneLabel.textContent = "Tono";
+  else toneLabel.textContent = `Tono ${semitones > 0 ? "+" : "−"}${Math.abs(semitones)}${moved ? " · arreglo" : ""}`;
+  toneDown.disabled = semitones <= -12;
+  toneUp.disabled = semitones >= 12;
+}
+
+function applyDetune() {
+  const cents = semitones * 100;
+  for (const source of active) source.detune.value = cents;
 }
 
 function setExport(message, kind) {
